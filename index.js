@@ -1,145 +1,70 @@
-import 'dotenv/config';
-import express from 'express';
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion
-} from '@whiskeysockets/baileys';
-import P from 'pino';
-import qrcode from 'qrcode-terminal';
-import fs from 'fs';
-import path from 'path';
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const express = require('express');
+const pino = require('pino');
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const DEFAULT_REPLY =
-  process.env.DEFAULT_REPLY ||
-  'Thanks for your message. Bot Brother engine is online.';
 
-let status = 'starting';
-
-const COMMANDS = {
-  '/start': 'Welcome to Bot Brother WhatsApp engine.',
-  '/menu': 'Menu:\n1. Info\n2. Support\n3. Prices',
-  '/price': 'See plans in Bot Brother Telegram bot.',
-  '/help': 'Commands: /start /menu /price /help'
-};
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, status, time: new Date().toISOString() });
+// Health check for Render + UptimeRobot
+app.get('/', (req, res) => {
+  res.send('Bot Brother WhatsApp Engine is alive ✅');
 });
 
-app.get('/status', (req, res) => {
-  res.json({ status });
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
-function matchCommand(text) {
-  const t = (text || '').trim().toLowerCase();
-  if (COMMANDS[t]) return COMMANDS[t];
-  if (t.includes('hello') || t.includes('hi')) {
-    return 'Hello! Bot Brother WhatsApp engine is online.';
-  }
-  return null;
-}
-
-async function startWhatsApp() {
-  const authDir = path.join(process.cwd(), 'auth_info');
-  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: P({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '22.04.4'],
-    markOnlineOnConnect: false,
-    syncFullHistory: false,
-    generateHighQualityLinkPreview: false
+    logger: pino({ level: 'silent' }),
+    browser: ['Bot Brother', 'Chrome', '1.0.0'],
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  // Request pairing code
+  if (!sock.authState.creds.registered) {
+    const phoneNumber = '2347038885825'; // without +
+    setTimeout(async () => {
+      const code = await sock.requestPairingCode(phoneNumber);
+      console.log('=================================');
+      console.log('PAIRING CODE:', code);
+      console.log('=================================');
+    }, 3000);
+  }
 
-    if (qr) {
-      status = 'qr';
-      console.log('\n=== SCAN QR (WhatsApp → Linked devices) ===\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\nIf QR is hard to scan, we can retry pairing after connect is stable.\n');
-    }
-
-    if (connection === 'open') {
-      status = 'connected';
-      console.log('\n✅ WhatsApp connected\n');
-    }
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
-      status = 'disconnected';
-      const code = lastDisconnect?.error?.output?.statusCode;
-      console.log('Connection closed', code, lastDisconnect?.error?.message || '');
-
-      // 401 = logged out / bad session → do not loop forever
-      if (code === DisconnectReason.loggedOut || code === 401) {
-        console.log('\nSession rejected (401). Delete auth_info and run npm start again.\n');
-        return;
+      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('Connection closed. Reconnecting:', shouldReconnect);
+      if (shouldReconnect) {
+        startBot();
       }
-
-      console.log('Reconnecting in 3s...');
-      setTimeout(() => startWhatsApp(), 3000);
+    } else if (connection === 'open') {
+      console.log('WhatsApp connected successfully ✅');
     }
   });
 
-  // Pairing code AFTER short delay (only if not registered)
-  const pairNumber = (process.env.PAIRING_NUMBER || '').replace(/\D/g, '');
-  if (pairNumber && !state.creds?.registered) {
-    setTimeout(async () => {
-      try {
-        const code = await sock.requestPairingCode(pairNumber);
-        status = 'pairing';
-        console.log('\n=== PAIRING CODE ===');
-        console.log(code);
-        console.log('WhatsApp → Linked devices → Link with phone number');
-        console.log('Enter this code on the phone.\n');
-      } catch (e) {
-        console.log('Pairing code error:', e.message);
-        console.log('Use the QR above instead.\n');
-      }
-    }, 5000);
-  }
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    const msg = messages[0];
-    if (!msg?.message || msg.key.fromMe) return;
+  // Basic message handler
+  sock.ev.on('messages.upsert', async (m) => {
+    const msg = m.messages[0];
+    if (!msg.message || msg.key.fromMe) return;
 
     const from = msg.key.remoteJid;
-    if (!from || from.endsWith('@g.us')) return;
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      '';
-    if (!text) return;
-
-    try {
-      const reply = matchCommand(text) || DEFAULT_REPLY;
-      await sock.sendMessage(from, { text: reply });
-    } catch (e) {
-      console.log('Reply error:', e.message);
+    if (text.toLowerCase() === 'ping') {
+      await sock.sendMessage(from, { text: 'Pong from Bot Brother 🚀' });
     }
   });
 }
 
-app.listen(PORT, () => {
-  console.log('Health server on', PORT);
-  startWhatsApp().catch((e) => {
-    status = 'error';
-    console.error(e);
-  });
-});
+startBot();
