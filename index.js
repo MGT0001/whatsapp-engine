@@ -3,23 +3,28 @@ const express = require('express');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
-const cors = require('cors');
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// Manual CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
-// Store active pairing requests (valid for 2 minutes)
+const PORT = process.env.PORT || 3000;
 const pairingRequests = new Map();
 
-// Health check - this must work
 app.get('/', (req, res) => {
   res.send('Bot Brother WhatsApp Engine is alive ✅');
 });
 
-// Start pairing
 app.post('/start-pairing', async (req, res) => {
   try {
     const { token, phone } = req.body;
@@ -83,7 +88,6 @@ app.post('/start-pairing', async (req, res) => {
   }
 });
 
-// Status check
 app.get('/status/:token', (req, res) => {
   const { token } = req.params;
   const request = pairingRequests.get(token);
