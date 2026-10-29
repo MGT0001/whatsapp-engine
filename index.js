@@ -3,36 +3,38 @@ const express = require('express');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const cors = require('cors');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
-// Store active pairing requests (code valid for 2 minutes)
+// Store active pairing requests (valid for 2 minutes)
 const pairingRequests = new Map();
 
-// Health check
+// Health check - this must work
 app.get('/', (req, res) => {
   res.send('Bot Brother WhatsApp Engine is alive ✅');
 });
 
-// Start pairing for a user
+// Start pairing
 app.post('/start-pairing', async (req, res) => {
-  const { token, phone } = req.body;
-
-  if (!token || !phone) {
-    return res.status(400).json({ success: false, error: 'Token and phone required' });
-  }
-
-  const cleanPhone = phone.replace(/\D/g, '');
-  const sessionPath = path.join(__dirname, 'sessions', token);
-
-  // Create session folder
-  if (!fs.existsSync(sessionPath)) {
-    fs.mkdirSync(sessionPath, { recursive: true });
-  }
-
   try {
+    const { token, phone } = req.body;
+
+    if (!token || !phone) {
+      return res.status(400).json({ success: false, error: 'Token and phone are required' });
+    }
+
+    const cleanPhone = phone.replace(/\D/g, '');
+    const sessionPath = path.join(__dirname, 'sessions', token);
+
+    if (!fs.existsSync(sessionPath)) {
+      fs.mkdirSync(sessionPath, { recursive: true });
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -50,41 +52,29 @@ app.post('/start-pairing', async (req, res) => {
 
     if (!sock.authState.creds.registered) {
       pairingCode = await sock.requestPairingCode(cleanPhone);
-      
-      // Store the request for 2 minutes
+
       pairingRequests.set(token, {
         code: pairingCode,
-        phone: cleanPhone,
-        sock,
-        expires: Date.now() + 2 * 60 * 1000 // 2 minutes
+        expires: Date.now() + 2 * 60 * 1000
       });
 
-      // Auto remove after 2 minutes
       setTimeout(() => {
         pairingRequests.delete(token);
       }, 2 * 60 * 1000);
     }
 
     sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect } = update;
-
+      const { connection } = update;
       if (connection === 'open') {
         console.log(`User ${token} connected successfully ✅`);
         pairingRequests.delete(token);
-      }
-
-      if (connection === 'close') {
-        const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          // Will reconnect on next request
-        }
       }
     });
 
     res.json({
       success: true,
       pairingCode: pairingCode,
-      expiresIn: 120 // seconds
+      expiresIn: 120
     });
 
   } catch (err) {
@@ -93,7 +83,7 @@ app.post('/start-pairing', async (req, res) => {
   }
 });
 
-// Check status
+// Status check
 app.get('/status/:token', (req, res) => {
   const { token } = req.params;
   const request = pairingRequests.get(token);
@@ -107,7 +97,6 @@ app.get('/status/:token', (req, res) => {
     });
   }
 
-  // Check if already connected
   const sessionPath = path.join(__dirname, 'sessions', token);
   if (fs.existsSync(path.join(sessionPath, 'creds.json'))) {
     return res.json({ success: true, status: 'connected' });
@@ -117,5 +106,5 @@ app.get('/status/:token', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`WhatsApp Engine running on port ${PORT}`);
+  console.log(`Bot Brother WhatsApp Engine running on port ${PORT}`);
 });
