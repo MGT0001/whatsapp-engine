@@ -7,14 +7,12 @@ const path = require('path');
 const app = express();
 app.use(express.json());
 
-// Manual CORS
+// CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
@@ -36,9 +34,11 @@ app.post('/start-pairing', async (req, res) => {
     const cleanPhone = phone.replace(/\D/g, '');
     const sessionPath = path.join(__dirname, 'sessions', token);
 
-    if (!fs.existsSync(sessionPath)) {
-      fs.mkdirSync(sessionPath, { recursive: true });
+    // Delete old session to avoid "Connection Closed" error
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
     }
+    fs.mkdirSync(sessionPath, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
@@ -48,15 +48,28 @@ app.post('/start-pairing', async (req, res) => {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: ['Bot Brother', 'Chrome', '1.0.0'],
+      browser: ['Bot Brother', 'Chrome', '122.0.0'],
+      markOnlineOnConnect: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
+    // Wait a bit before requesting pairing code
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
     let pairingCode = null;
 
     if (!sock.authState.creds.registered) {
-      pairingCode = await sock.requestPairingCode(cleanPhone);
+      try {
+        pairingCode = await sock.requestPairingCode(cleanPhone);
+        console.log(`Pairing code for ${token}: ${pairingCode}`);
+      } catch (err) {
+        console.error('Pairing code error:', err);
+        return res.status(500).json({ 
+          success: false, 
+          error: 'WhatsApp rejected the request. Wait 2 minutes and try again.' 
+        });
+      }
 
       pairingRequests.set(token, {
         code: pairingCode,
@@ -69,10 +82,16 @@ app.post('/start-pairing', async (req, res) => {
     }
 
     sock.ev.on('connection.update', (update) => {
-      const { connection } = update;
+      const { connection, lastDisconnect } = update;
+
       if (connection === 'open') {
-        console.log(`User ${token} connected successfully ✅`);
+        console.log(`✅ User ${token} connected successfully`);
         pairingRequests.delete(token);
+      }
+
+      if (connection === 'close') {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        console.log(`Connection closed for ${token}. Code:`, code);
       }
     });
 
@@ -84,7 +103,7 @@ app.post('/start-pairing', async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, error: 'Failed to start pairing' });
+    res.status(500).json({ success: false, error: 'Failed to start pairing. Try again later.' });
   }
 });
 
