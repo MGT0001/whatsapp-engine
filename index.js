@@ -19,22 +19,48 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const pairingRequests = new Map();
 
+// Temporary token store (we will later connect this to real database)
+// Format: token -> { expiresAt: timestamp, plan: string, used: boolean }
+const validTokens = {
+  // Example tokens (admin will generate real ones later)
+  "TEST1234": { expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, plan: "monthly", used: false },
+  "BBT00001": { expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, plan: "weekly", used: false },
+};
+
 app.get('/', (req, res) => {
   res.send('Bot Brother WhatsApp Engine is alive ✅');
 });
+
+// Check if token is valid
+function isTokenValid(token) {
+  const data = validTokens[token];
+  if (!data) return { valid: false, reason: "Token does not exist" };
+  if (data.expiresAt < Date.now()) return { valid: false, reason: "Token has expired" };
+  return { valid: true, data };
+}
 
 app.post('/start-pairing', async (req, res) => {
   try {
     const { token, phone } = req.body;
 
     if (!token || !phone) {
-      return res.status(400).json({ success: false, error: 'Token and phone are required' });
+      return res.status(400).json({ success: false, error: 'Token and phone number are required' });
+    }
+
+    // Strict token validation
+    const tokenCheck = isTokenValid(token);
+    if (!tokenCheck.valid) {
+      return res.status(403).json({ success: false, error: tokenCheck.reason });
     }
 
     const cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number' });
+    }
+
     const sessionPath = path.join(__dirname, 'sessions', token);
 
-    // Delete old session to avoid "Connection Closed" error
+    // Clear old session to avoid connection closed error
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
@@ -54,56 +80,60 @@ app.post('/start-pairing', async (req, res) => {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Wait a bit before requesting pairing code
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Small delay before requesting code
+    await new Promise(resolve => setTimeout(resolve, 2500));
 
     let pairingCode = null;
 
     if (!sock.authState.creds.registered) {
       try {
         pairingCode = await sock.requestPairingCode(cleanPhone);
-        console.log(`Pairing code for ${token}: ${pairingCode}`);
+        console.log(`[${token}] Pairing code generated: ${pairingCode}`);
       } catch (err) {
-        console.error('Pairing code error:', err);
-        return res.status(500).json({ 
-          success: false, 
-          error: 'WhatsApp rejected the request. Wait 2 minutes and try again.' 
+        console.error(`[${token}] Pairing error:`, err?.message || err);
+        return res.status(500).json({
+          success: false,
+          error: 'WhatsApp rejected the request. Please wait 3-5 minutes and try again.'
         });
       }
 
+      // Store for 5 minutes
       pairingRequests.set(token, {
         code: pairingCode,
-        expires: Date.now() + 2 * 60 * 1000
+        phone: cleanPhone,
+        expires: Date.now() + 5 * 60 * 1000
       });
 
       setTimeout(() => {
         pairingRequests.delete(token);
-      }, 2 * 60 * 1000);
+      }, 5 * 60 * 1000);
     }
 
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect } = update;
 
       if (connection === 'open') {
-        console.log(`✅ User ${token} connected successfully`);
+        console.log(`✅ [${token}] WhatsApp connected successfully`);
         pairingRequests.delete(token);
+        // Mark token as used
+        if (validTokens[token]) validTokens[token].used = true;
       }
 
       if (connection === 'close') {
-        const code = lastDisconnect?.error?.output?.statusCode;
-        console.log(`Connection closed for ${token}. Code:`, code);
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        console.log(`[${token}] Connection closed. Code: ${statusCode}`);
       }
     });
 
     res.json({
       success: true,
       pairingCode: pairingCode,
-      expiresIn: 120
+      expiresIn: 300 // 5 minutes
     });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, error: 'Failed to start pairing. Try again later.' });
+    res.status(500).json({ success: false, error: 'Server error. Please try again.' });
   }
 });
 
