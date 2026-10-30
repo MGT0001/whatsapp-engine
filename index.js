@@ -19,37 +19,50 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const pairingRequests = new Map();
 
-// Temporary token store (we will later connect this to real database)
-// Format: token -> { expiresAt: timestamp, plan: string, used: boolean }
+// ======================
+// TEMPORARY TEST TOKENS
+// ======================
 const validTokens = {
-  // Example tokens (admin will generate real ones later)
-  "TEST1234": { expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, plan: "monthly", used: false },
-  "BBT00001": { expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, plan: "weekly", used: false },
+  "TEST1234": { expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000, plan: "test" },
+  "ADMIN001": { expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000, plan: "admin" },
+  "BBT00001": { expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, plan: "monthly" },
 };
+
+function isTokenValid(token) {
+  if (!token) return { valid: false, reason: "Token is required" };
+  
+  const cleanToken = token.trim().toUpperCase();
+  const data = validTokens[cleanToken];
+  
+  if (!data) {
+    return { valid: false, reason: "Invalid token. Token does not exist." };
+  }
+  
+  if (data.expiresAt < Date.now()) {
+    return { valid: false, reason: "This token has expired." };
+  }
+  
+  return { valid: true, data, cleanToken };
+}
 
 app.get('/', (req, res) => {
   res.send('Bot Brother WhatsApp Engine is alive ✅');
 });
 
-// Check if token is valid
-function isTokenValid(token) {
-  const data = validTokens[token];
-  if (!data) return { valid: false, reason: "Token does not exist" };
-  if (data.expiresAt < Date.now()) return { valid: false, reason: "Token has expired" };
-  return { valid: true, data };
-}
-
 app.post('/start-pairing', async (req, res) => {
   try {
     const { token, phone } = req.body;
+
+    console.log('Received request:', { token, phone });
 
     if (!token || !phone) {
       return res.status(400).json({ success: false, error: 'Token and phone number are required' });
     }
 
-    // Strict token validation
+    // Validate token
     const tokenCheck = isTokenValid(token);
     if (!tokenCheck.valid) {
+      console.log('Token rejected:', tokenCheck.reason);
       return res.status(403).json({ success: false, error: tokenCheck.reason });
     }
 
@@ -58,9 +71,9 @@ app.post('/start-pairing', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
 
-    const sessionPath = path.join(__dirname, 'sessions', token);
+    const sessionPath = path.join(__dirname, 'sessions', tokenCheck.cleanToken);
 
-    // Clear old session to avoid connection closed error
+    // Clear old session
     if (fs.existsSync(sessionPath)) {
       fs.rmSync(sessionPath, { recursive: true, force: true });
     }
@@ -80,55 +93,44 @@ app.post('/start-pairing', async (req, res) => {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Small delay before requesting code
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     let pairingCode = null;
 
     if (!sock.authState.creds.registered) {
       try {
         pairingCode = await sock.requestPairingCode(cleanPhone);
-        console.log(`[${token}] Pairing code generated: ${pairingCode}`);
+        console.log(`[${tokenCheck.cleanToken}] Pairing code: ${pairingCode}`);
       } catch (err) {
-        console.error(`[${token}] Pairing error:`, err?.message || err);
+        console.error('Pairing error:', err?.message || err);
         return res.status(500).json({
           success: false,
-          error: 'WhatsApp rejected the request. Please wait 3-5 minutes and try again.'
+          error: 'WhatsApp rejected the request. Wait 3 minutes and try again.'
         });
       }
 
-      // Store for 5 minutes
-      pairingRequests.set(token, {
+      pairingRequests.set(tokenCheck.cleanToken, {
         code: pairingCode,
-        phone: cleanPhone,
-        expires: Date.now() + 5 * 60 * 1000
+        expires: Date.now() + 5 * 60 * 1000 // 5 minutes
       });
 
       setTimeout(() => {
-        pairingRequests.delete(token);
+        pairingRequests.delete(tokenCheck.cleanToken);
       }, 5 * 60 * 1000);
     }
 
     sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect } = update;
-
+      const { connection } = update;
       if (connection === 'open') {
-        console.log(`✅ [${token}] WhatsApp connected successfully`);
-        pairingRequests.delete(token);
-        // Mark token as used
-        if (validTokens[token]) validTokens[token].used = true;
-      }
-
-      if (connection === 'close') {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        console.log(`[${token}] Connection closed. Code: ${statusCode}`);
+        console.log(`✅ [${tokenCheck.cleanToken}] Connected successfully`);
+        pairingRequests.delete(tokenCheck.cleanToken);
       }
     });
 
     res.json({
       success: true,
       pairingCode: pairingCode,
-      expiresIn: 300 // 5 minutes
+      expiresIn: 300
     });
 
   } catch (err) {
@@ -138,7 +140,7 @@ app.post('/start-pairing', async (req, res) => {
 });
 
 app.get('/status/:token', (req, res) => {
-  const { token } = req.params;
+  const token = req.params.token.toUpperCase();
   const request = pairingRequests.get(token);
 
   if (request && Date.now() < request.expires) {
